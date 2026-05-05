@@ -1,0 +1,62 @@
+import sqlite3
+
+def setup_database():
+    conn = sqlite3.connect('fleet.db')
+    cursor = conn.cursor()
+
+    # 1. Create Trucks Table
+    # status: 'IDLE', 'EN_ROUTE', 'MAINTENANCE'
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trucks (
+            id TEXT PRIMARY KEY,
+            model TEXT,
+            status TEXT,
+            health_score INTEGER,
+            lidar_version TEXT,
+            last_service_date TEXT,
+            current_location TEXT
+        )
+    ''')
+
+    # 2. Create Missions Table
+    # cargo_weight in tons
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS missions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            truck_id TEXT,
+            origin TEXT,
+            destination TEXT,
+            cargo_type TEXT,
+            cargo_weight_tons REAL,
+            start_time TEXT,
+            eta TEXT,
+            FOREIGN KEY (truck_id) REFERENCES trucks (id)
+        )
+    ''')
+
+    # 3. Seed initial data
+    trucks = [
+        ('BOT-001', 'Gen3-Heavy', 'EN_ROUTE', 98, 'v4.2', '2026-04-15', 'I-45 North, Madisonville'),
+        ('BOT-012', 'Gen3-Heavy', 'EN_ROUTE', 92, 'v4.1', '2026-05-01', 'I-45 South, Corsicana'),
+        ('BOT-015', 'Gen2-Retro', 'IDLE', 85, 'v3.8', '2026-03-20', 'Houston Hub'),
+        ('BOT-019', 'Gen3-Heavy', 'IDLE', 100, 'v4.2', '2026-05-03', 'Houston Hub'),
+        ('BOT-022', 'Gen3-Heavy', 'MAINTENANCE', 45, 'v4.2', '2026-05-04', 'Dallas Service Center')
+    ]
+
+    missions = [
+        ('BOT-001', 'Houston', 'Hutchins', 'Electronics', 18.5, '2026-05-04 20:00', '2026-05-05 01:30'),
+        ('BOT-012', 'Hutchins', 'Houston', 'Produce', 12.0, '2026-05-04 21:15', '2026-05-05 02:45')
+    ]
+
+    cursor.executemany('INSERT OR REPLACE INTO trucks VALUES (?,?,?,?,?,?,?)', trucks)
+    cursor.executemany('''
+        INSERT OR REPLACE INTO missions (truck_id, origin, destination, cargo_type, cargo_weight_tons, start_time, eta)
+        VALUES (?,?,?,?,?,?,?)
+    ''', missions)
+
+    conn.commit()
+    conn.close()
+    print("Fleet database initialized successfully.")
+
+if __name__ == "__main__":
+    setup_database()

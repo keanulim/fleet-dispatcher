@@ -1,60 +1,114 @@
+import json
+from typing import Annotated, TypedDict, List
 from langgraph.graph import StateGraph, END
-from state import AgentState, MissionDecision
-from tools import fetch_weather, fetch_truck_status
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from tools import query_available_trucks, get_active_missions, check_route_conditions, query_safety_regulations
 
+# --- 1. SETUP THE TOOLS ---
+# We map the tools so the LLM knows what functions are available
+tools = {
+    "query_available_trucks": query_available_trucks,
+    "get_active_missions": get_active_missions,
+    "check_route_conditions": check_route_conditions,
+    "query_safety_regulations": query_safety_regulations
+}
 
-# --- NODES: The steps in the reasoning process ---
-
-def observer_node(state: AgentState):
-    """Step 1: Gather real-time data."""
-    dest = state["shipment_request"].get("destination", "Dallas")
-    truck_id = state["shipment_request"].get("truck_id", "BOT-001")
-
-    return {
-        "weather_data": fetch_weather(dest),
-        "truck_telemetry": fetch_truck_status(truck_id)
+# Define the tool definitions for the LLM
+tool_definitions = [
+    {
+        "name": "query_available_trucks",
+        "description": "Returns a list of healthy, idle trucks ready for new jobs.",
+        "parameters": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "get_active_missions",
+        "description": "Returns details on all trucks currently on deliveries.",
+        "parameters": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "check_route_conditions",
+        "description": "Checks weather for a specific location (e.g. 'Madisonville').",
+        "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"]
+        }
+    },
+    {
+        "name": "query_safety_regulations",
+        "description": "Searches for autonomous vehicle safety laws and FMCSA rules.",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        }
     }
+]
 
 
-def auditor_node(state: AgentState):
-    """Step 2: Cross-reference data with Safety Laws (RAG)."""
-    # Simulate a RAG lookup here
-    reg_text = "TX Law: Humanless flight prohibited if visibility < 0.25 miles."
-    return {"regulatory_check": reg_text}
+# --- 2. DEFINE THE STATE ---
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], "The conversation history"]
 
 
-def decider_node(state: AgentState):
-    """Step 3: The LLM processes everything and decides."""
-    # Logic: Compare weather visibility vs regulation text
-    viz = state["weather_data"]["visibility_miles"]
+# --- 3. THE NODES ---
 
-    if viz < 0.25:
-        decision = MissionDecision(
-            is_authorized=False,
-            risk_level="High",
-            reasoning=f"Visibility {viz} is below the legal threshold of 0.25mi.",
-            warnings=["Weather Violation"]
-        )
-    else:
-        decision = MissionDecision(
-            is_authorized=True,
-            risk_level="Low",
-            reasoning="All systems optimal and weather within ODD limits.",
-            warnings=[]
-        )
-    return {"mission_output": decision}
+model = ChatOpenAI(model="gpt-4o", temperature=0).bind_tools(tool_definitions)
 
 
-# --- GRAPH CONSTRUCTION ---
+def call_model(state: AgentState):
+    """The LLM decides what to do next."""
+    response = model.invoke(state["messages"])
+    return {"messages": [response]}
+
+
+def call_tool(state: AgentState):
+    """Executes the tool the LLM requested."""
+    last_message = state["messages"][-1]
+    tool_messages = []
+
+    for tool_call in last_message.tool_calls:
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+        # Execute the actual Python function from tools.py
+        result = tools[tool_name](**tool_args)
+
+        tool_messages.append(ToolMessage(
+            tool_call_id=tool_call["id"],
+            content=json.dumps(result)
+        ))
+
+    return {"messages": tool_messages}
+
+
+# --- 4. THE GRAPH ---
 
 workflow = StateGraph(AgentState)
-workflow.add_node("observe", observer_node)
-workflow.add_node("audit", auditor_node)
-workflow.add_node("decide", decider_node)
 
-workflow.set_entry_point("observe")
-workflow.add_edge("observe", "audit")
-workflow.add_edge("audit", "decide")
-workflow.add_edge("decide", END)
+workflow.add_node("agent", call_model)
+workflow.add_node("action", call_tool)
 
-orchestrator = workflow.compile()
+workflow.set_entry_point("agent")
+
+
+# Logic: If the model called a tool, go to 'action'. Otherwise, finish.
+def should_continue(state: AgentState):
+    last_message = state["messages"][-1]
+    if last_message.tool_calls:
+        return "continue"
+    return "end"
+
+
+workflow.add_conditional_edges(
+    "agent",
+    should_continue,
+    {
+        "continue": "action",
+        "end": END
+    }
+)
+
+workflow.add_edge("action", "agent")
+
+bot_os = workflow.compile()
