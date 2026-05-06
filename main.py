@@ -1,60 +1,48 @@
+import os
 import asyncio
-from agent import orchestrator
+from dotenv import load_dotenv
 
-async def run_dispatch_test():
-    # 1. Mock a real request from Ryan Transportation (Bot Auto's Partner)
-    # Route: Houston (Riggy's) to Hutchins (Safe Stop)
-    shipment_request = {
-        "truck_id": "BOT-012",
-        "cargo": "Server Racks",
-        "origin": "Houston",
-        "destination": "Hutchins",
-        "departure_time": "2026-05-04T03:00:00"
-    }
+load_dotenv()
 
-    print(f"--- INITIALIZING DISPATCH FOR: {shipment_request['cargo']} ---")
+from agent import bot_os
+from langchain_core.messages import HumanMessage
 
-    # 2. Initialize the State
-    initial_state = {
-        "shipment_request": shipment_request,
-        "weather_data": None,
-        "truck_telemetry": None,
-        "regulatory_check": None,
-        "mission_output": None,
-        "error": None
-    }
 
-    final_state = initial_state
-    async for output in orchestrator.astream(initial_state):
-        for node, data in output.items():
-            if data is None: continue
+async def main():
+    print("\n--- BotOS Fleet Command & Control Initialized ---")
 
-            # Update our tracker so we have the full state at the end
-            final_state.update(data)
+    # Persistent history for the session
+    history = []
 
-            print(f"\n[NODE COMPLETED]: {node}")
+    while True:
+        user_input = input("Fleet Manager > ")
+        if user_input.lower() in ["exit", "quit"]:
+            break
 
-            # Print intermediate updates
-            if 'weather_data' in data:
-                w = data['weather_data']
-                print(f"   -> Weather: {w.get('condition')}, {w.get('visibility_miles')}mi visibility")
+        # Run the agent
+        # We pass the full history plus the new input
+        inputs = {"messages": history + [HumanMessage(content=user_input)]}
 
-            if 'regulatory_check' in data:
-                print(f"   -> Safety Law: {data['regulatory_check']}")
+        async for chunk in bot_os.astream(inputs, stream_mode="values"):
+            final_msg = chunk["messages"][-1]
 
-    # 4. FINAL RECAP (Outside the loop to ensure it prints)
-    print("\n" + "=" * 40)
-    print("FINAL MISSION CONTROL REPORT")
-    print("=" * 40)
+            # Extract and print the final response as normal text
+        if final_msg.content:
+            content = final_msg.content
 
-    decision = final_state.get('mission_output')
-    if decision:
-        status = "✅ AUTHORIZED" if decision.decision == "AUTHORIZED" else "❌ REJECTED"
-        print(f"STATUS: {status}")
-        print(f"REASONING: {decision.reasoning}")
-        print(f"RISK LEVEL: {decision.risk_level}")
-    else:
-        print("⚠️ Error: No decision was reached by the orchestrator.")
+            # Handle the Gemini-specific list format
+            if isinstance(content, list):
+                # Joins all text parts together into one string
+                clean_text = " ".join([part['text'] for part in content if 'text' in part])
+            else:
+                clean_text = content
+
+            print(f"\n[BotOS]: {clean_text}\n")
+
+            # Update history for the next turn
+            history = chunk["messages"]
+            history = history[-10:]
+
 
 if __name__ == "__main__":
-    asyncio.run(run_dispatch_test())
+    asyncio.run(main())
